@@ -9,6 +9,15 @@ void main() {
 	};
 };
 
+unittest {	
+	import std.stdio;
+	import std.meta;
+	import std.traits;
+
+	//long b = 6;
+	//pragma(msg, pod!(b => .b).b);
+};
+
 /* --- */
 
 unittest {
@@ -72,8 +81,8 @@ unittest {
 };
 
 unittest {
-	/* duplicate names are allowed for some reason */
-	assert(pod!(X => 1, X => 2).sizeof == (int[2]).sizeof);
+	/* duplicate names are not allowed */
+	assert(!__traits(compiles, pod!(X => 1, X => 2)));
 };
 
 unittest {
@@ -87,22 +96,36 @@ unittest {
 };
 
 unittest {
+	/* class construction */
+
+	struct Util {
+		mixin template InitFields(alias Vals) {
+			int _ = ({
+				import std.traits : FieldNameTuple;
+				foreach (X; FieldNameTuple!(typeof(this))) {
+					__traits(getMember, this, X) = __traits(getMember, Vals, X);
+				};
+				return 0;
+			})();
+		};
+
+		template FromPodSpecs(alias Objº) {
+			static alias FromPodSpecs(Specs...) = 
+				forward_specs!(Vals => new Objº(Vals), Specs)
+			;
+		};
+	};
+
 	/* ctor */
 	static class Cº {
 		int X;
 		long Y;
 
 		this(Tº)(Tº Data) {
-			import std.traits;
-			foreach (N; FieldNameTuple!(typeof(this))) {
-				__traits(getMember, this, N) = __traits(getMember, Data, N);
-			};
+			{mixin Util.InitFields!Data;};
 		};
 
-		/* forwarding */
-		static alias of(Specs...) =
-			forward_specs!(Data => new typeof(this)(Data), Specs)
-		;
+		alias of = Util.FromPodSpecs!(typeof(this));
 	};
 
 	/* stack var */
@@ -132,11 +155,90 @@ unittest {
 	};
 };
 
+unittest {
+	/* making ranges (not good) */
+
+	auto f() {
+		auto r = [pod!(
+			front => 0,
+			empty => false,
+			popFront => (void delegate()).init
+		)].ptr;
+		r.popFront = {r.empty = ++r.front == 7;};
+		return r;
+	};
+
+	import std.range;
+	assert(isInputRange!(typeof(f())));
+
+	// import std.array;
+	// assert(f().array == [0, 1, 2, 3, 4, 5, 6]); // fail
+
+	// foreach (x; f()) { // fail
+
+	/* better */
+	auto g() {
+		int Elem;
+		return new class {
+			@property int front() {return Elem;};
+			bool empty;
+			void popFront() {
+				empty = ++Elem == 7;
+			};
+		};
+	};
+
+	assert(isInputRange!(typeof(g())));
+
+	import std.array;
+	assert(g().array == [0, 1, 2, 3, 4, 5, 6]);
+};
+
 /* --- */
 
 auto pod()() @safe pure nothrow @nogc {
-	static struct Podº {};
-	return Podº();
+	return Podº!()();
+};
+
+template pod(Specs...) {
+	/* ? */
+
+	char[] struct_body_str() {
+		char[] S;
+		foreach (Idx, _; Specs) {
+			S ~= `typeof(Specs[`~Idx.stringof~`]((void[0]).init)), `;
+			S ~= `"`~pod_spec_ident!(Idx, Specs)~`", `;
+		};
+		return S;
+	};
+
+	auto pod() {
+		mixin(`alias Tº = Podº!(`~struct_body_str~`);`);
+		return pod!(Tº, Specs);
+	};
+};
+
+template pod(Tº, Specs...) if (is(Tº == struct) && __traits(isPOD, Tº)) {
+	/* ? */
+
+	char[] instance_body_str() {
+		char[] S;
+		foreach (Idx, _; Specs) {
+			S ~= pod_spec_ident!(Idx, Specs)~` : `;
+			S ~= `Specs[`~Idx.stringof~`]((void[0]).init),`;
+		};
+		return S;
+	};
+
+	auto pod() {
+		mixin(`Tº Obj = {`~instance_body_str~`};`);
+		return Obj;
+		static assert(is(typeof(Obj) == Tº));
+	};
+};
+
+auto forward_specs(alias f, Specs...)() {
+	return f(pod!Specs);
 };
 
 struct Podº(Specs...) if (Specs.length % 2 == 0) {
@@ -153,93 +255,10 @@ unittest {
 	assert([__traits(allMembers, Podº!(int, `x`, int, `z`))] == [`x`, `z`]);
 };
 
-template pod(Specs...) {
-	/* ? */
-
-	string spec_ident(size_t Idx)() {
-		alias LambTypeº = LambdaType!(Specs[Idx], int);
-
-		static if (is(LambTypeº Fº == delegate)) {
-			alias FuncTypeº = Fº;
-		} else static if (is(LambTypeº Fº : Fº*)) {
-			alias FuncTypeº = Fº;
-		} else {
-			static assert(0, `field spec #`~Idx.stringof~` is invalid`);
-		};
-
-		static if (is(FuncTypeº P == __parameters)) {
-			return __traits(identifier, P);
-		} else {
-			static assert(0, `field spec #`~Idx.stringof~` is invalid`);
-		};
-	};
-
-	char[] struct_body_str() {
-		char[] S;
-		foreach (Idx, _; Specs) {
-			S ~= `typeof(Specs[`~Idx.stringof~`](0)), "`~spec_ident!Idx~`",`;
-		};
-		return S;
-	};
-
-	char[] instance_body_str() {
-		char[] S;
-		foreach (Idx, _; Specs) {
-			S ~= `Specs[`~Idx.stringof~`](0),`;
-		};
-		return S;
-	};
-
-	auto pod() {
-		return mixin(`Podº!(`~struct_body_str~`)(`~instance_body_str~`)`);
-	};
-};
-
-template pod(Tº, Specs...) if (is(Tº == struct) && __traits(isPOD, Tº)) {
-	/* ? */
-
-	string spec_ident(size_t Idx)() {
-		alias LambTypeº = LambdaType!(Specs[Idx], int);
-
-		static if (is(LambTypeº Fº == delegate)) {
-			alias FuncTypeº = Fº;
-		} else static if (is(LambTypeº Fº : Fº*)) {
-			alias FuncTypeº = Fº;
-		} else {
-			static assert(0, `field spec #`~Idx.stringof~` is invalid`);
-		};
-
-		static if (is(FuncTypeº P == __parameters)) {
-			return __traits(identifier, P);
-		} else {
-			static assert(0, `field spec #`~Idx.stringof~` is invalid`);
-		};
-	};
-
-	char[] instance_body_str() {
-		char[] S;
-		foreach (Idx, _; Specs) {
-			S ~= spec_ident!Idx~` : Specs[`~Idx.stringof~`](0),`;
-		};
-		return S;
-	};
-
-	auto pod() {
-		mixin(`Tº Obj = {`~instance_body_str~`};`);
-		return Obj;
-
-		static assert(is(typeof(Obj) == Tº));
-	};
-};
-
-auto forward_specs(alias f, Specs...)() {
-	return f(pod!Specs);
-};
-
 /* --- */
 
-private template LambdaType(alias LambTempl, ParamTypesº...) {
-	auto f() {return LambTempl!(ParamTypesº);};
+private template LambdaType(alias LambdaTemplate, ParamTypesº...) {
+	auto f() {return LambdaTemplate!(ParamTypesº);};
 	alias LambdaType = typeof(f());
 };
 
@@ -247,6 +266,29 @@ private mixin template PodDecls(size_t Idx, Specs...) {
 	static if (Idx < Specs.length) {
 		mixin(`Specs[`~Idx.stringof~`] `~Specs[Idx + 1]~`;`);
 		mixin PodDecls!(Idx + 2, Specs);
+	};
+};
+
+private string pod_spec_ident(size_t Idx, Specs...)() {
+	enum int Idx1 = Idx + 1;
+	enum Err = `field spec #`~Idx1.stringof~` is invalid`;
+
+	static assert(__traits(isTemplate, Specs[Idx]), Err);
+
+	alias RawTypeº = LambdaType!(Specs[Idx], void[0]);
+
+	static if (is(RawTypeº Fº == delegate)) {
+		alias FuncTypeº = Fº;
+	} else static if (is(RawTypeº Fº : Fº*)) {
+		alias FuncTypeº = Fº;
+	} else {
+		static assert(0, Err);
+	};
+
+	static if (is(FuncTypeº P == __parameters)) {
+		return __traits(identifier, P);
+	} else {
+		static assert(0, Err);
 	};
 };
 
