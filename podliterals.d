@@ -1,5 +1,8 @@
 /* --- */
 
+// TODO: unions
+// pod!(Tº, Specs...) might already work with unions
+
 void main() {
 	import std.stdio;
 	version (unittest) {
@@ -9,7 +12,7 @@ void main() {
 	};
 };
 
-unittest {	
+unittest {
 	import std.stdio;
 	import std.meta;
 	import std.traits;
@@ -22,7 +25,7 @@ unittest {
 
 unittest {
 	/* make a struct */
-	auto Data = pod!(
+	immutable Data = pod!(
 		Name => `jeff`,
 		Id => 57599538L,
 		Alive => true,
@@ -59,6 +62,19 @@ unittest {
 };
 
 unittest {
+	auto Inf = float.infinity;
+
+	/* union */
+	auto U = pod!(
+		(string X) => null,
+		(float Z) => Inf,
+		(long* Y) => null,
+	);
+
+	assert(U.X.length == 0x7F800000);
+};
+
+unittest {
 	/* type reuse */
 	assert(is(typeof(pod!(X => 1)) == typeof(pod!(X => 2))));
 	assert(!is(typeof(pod!(X => 1L)) == typeof(pod!(X => 2))));
@@ -68,8 +84,12 @@ unittest {
 
 unittest {
 	/* empty */
-	assert(is(typeof(pod()) == struct));
-	assert(is(typeof(pod()) == typeof(pod())));
+	auto EmptyPod = pod!();
+	assert(EmptyPod is pod!());
+	assert(is(typeof(pod!()) == struct));
+	assert(is(typeof(pod!()) == typeof(pod!())));
+	import std.traits : FieldNameTuple;
+	assert(FieldNameTuple!(typeof(pod!())).length == 0);
 
 	/* default vals */
 	struct Xyzº {
@@ -91,7 +111,7 @@ unittest {
 	static auto bar(Tº)(Tº Data) {return Data.X;};
 
 	long Foo = 9;
-	alias asdf = forward_specs!(bar, X => Foo);
+	alias asdf = forward_pod!(bar, X => Foo);
 	assert(asdf() == 9);
 };
 
@@ -110,8 +130,8 @@ unittest {
 		};
 
 		template FromPodSpecs(alias Objº) {
-			static alias FromPodSpecs(Specs...) = 
-				forward_specs!(Vals => new Objº(Vals), Specs)
+			static alias FromPodSpecs(Specs...) =
+				forward_pod!(Vals => new Objº(Vals), Specs)
 			;
 		};
 	};
@@ -196,48 +216,72 @@ unittest {
 
 /* --- */
 
-auto pod()() @safe pure nothrow @nogc {
-	return Podº!()();
-};
+enum pod() = Podº!()();
 
-template pod(Specs...) {
-	/* ? */
+auto pod(Specs...)() if (__traits(isTemplate, Specs)) {
+	/* structure-type POD */
 
-	char[] struct_body_str() {
+	char[] StructBodyStr() {
 		char[] S;
 		foreach (Idx, _; Specs) {
 			S ~= `typeof(Specs[`~Idx.stringof~`]((void[0]).init)), `;
-			S ~= `"`~pod_spec_ident!(Idx, Specs)~`", `;
+			S ~= `"`~PodSpecIdent!(Specs[Idx], Idx)~`", `;
 		};
 		return S;
 	};
 
-	auto pod() {
-		mixin(`alias Tº = Podº!(`~struct_body_str~`);`);
-		return pod!(Tº, Specs);
-	};
+	mixin(`alias Tº = Podº!(`~StructBodyStr~`);`);
+	return pod!(Tº, Specs);
 };
 
-template pod(Tº, Specs...) if (is(Tº == struct) && __traits(isPOD, Tº)) {
-	/* ? */
+auto pod(Specs...)() if (!__traits(isTemplate, Specs)) {
+	/* union-type POD */
 
-	char[] instance_body_str() {
+	alias Q(size_t Idx) = UnionSpecInfo!(Specs[Idx], Idx);
+
+	char[] UnionBodyStr() {
 		char[] S;
 		foreach (Idx, _; Specs) {
-			S ~= pod_spec_ident!(Idx, Specs)~` : `;
+			S ~= `Q!`~Idx.stringof~`.ParamTypeº, "`~Q!Idx.ParamName~`", `;
+		};
+		return S;
+	};
+
+	char[] InstanceBodyStr() {
+		char[] S;
+		foreach (Idx, _; Specs) {
+			if (is(Q!Idx.RetTypeº == typeof(null))) {continue;};
+			/* `ParamName : Specs[Idx](ParamTypeº.init),` */
+			S ~= Q!Idx.ParamName~` : `;
+			S ~= `Specs[`~Idx.stringof~`](Q!`~Idx.stringof~`.ParamTypeº.init),`;
+		};
+		return S;
+	};
+
+	mixin(`alias Tº = PodUnionº!(`~UnionBodyStr~`);`);
+	mixin(`Tº Obj = {`~InstanceBodyStr~`};`);
+	return Obj;
+	static assert(__traits(isPOD, Tº));
+};
+
+auto pod(Tº, Specs...)() if (is(Tº == struct) && __traits(isPOD, Tº)) {
+	/* instanciate POD from existing structure type */
+
+	char[] InstanceBodyStr() {
+		char[] S;
+		foreach (Idx, _; Specs) {
+			S ~= PodSpecIdent!(Specs[Idx], Idx)~` : `;
 			S ~= `Specs[`~Idx.stringof~`]((void[0]).init),`;
 		};
 		return S;
 	};
 
-	auto pod() {
-		mixin(`Tº Obj = {`~instance_body_str~`};`);
-		return Obj;
-		static assert(is(typeof(Obj) == Tº));
-	};
+	mixin(`Tº Obj = {`~InstanceBodyStr~`};`);
+	return Obj;
+	static assert(is(typeof(Obj) == Tº));
 };
 
-auto forward_specs(alias f, Specs...)() {
+auto forward_pod(alias f, Specs...)() {
 	return f(pod!Specs);
 };
 
@@ -246,8 +290,14 @@ struct Podº(Specs...) if (Specs.length % 2 == 0) {
 	mixin PodDecls!(0, Specs);
 	static assert(__traits(isPOD, typeof(this)));
 };
+union PodUnionº(Specs...) if (Specs.length % 2 == 0) {
+	/* Specs: (type0, `name0`, type1, `name1`, ...) */
+	mixin PodDecls!(0, Specs);
+	static assert(__traits(isPOD, typeof(this)));
+};
 unittest {
 	assert(is(Podº!(int, `x`) == Podº!(int, `x`)));
+	assert(is(PodUnionº!(int, `x`) == PodUnionº!(int, `x`)));
 	assert(is(typeof(Podº!(int, `x`).x) == int));
 	assert(is(Podº!(int, `x`, Object, `y`) == Podº!(int, `x`, Object, `y`)));
 	assert(!is(Podº!(int, `x`, TypeInfo, `y`) == Podº!(int, `x`, Object, `y`)));
@@ -269,26 +319,37 @@ private mixin template PodDecls(size_t Idx, Specs...) {
 	};
 };
 
-private string pod_spec_ident(size_t Idx, Specs...)() {
-	enum int Idx1 = Idx + 1;
-	enum Err = `field spec #`~Idx1.stringof~` is invalid`;
-
-	static assert(__traits(isTemplate, Specs[Idx]), Err);
-
-	alias RawTypeº = LambdaType!(Specs[Idx], void[0]);
-
-	static if (is(RawTypeº Fº == delegate)) {
-		alias FuncTypeº = Fº;
-	} else static if (is(RawTypeº Fº : Fº*)) {
-		alias FuncTypeº = Fº;
+private template PodSpecIdent(alias Spec, size_t Idx) {
+	static if (
+		__traits(isTemplate, Spec) &&
+		is(LambdaType!(Spec, void[0]) Rawº) &&
+		(is(Rawº Fº == delegate) || is(Rawº Fº : Fº*)) &&
+		is(Fº P == __parameters)
+	) {
+		enum PodSpecIdent = __traits(identifier, P);
 	} else {
-		static assert(0, Err);
+		enum int Idx1 = Idx + 1;
+		static assert(0, `field spec #`~Idx1.stringof~` is invalid`);
 	};
+};
 
-	static if (is(FuncTypeº P == __parameters)) {
-		return __traits(identifier, P);
+private template UnionSpecInfo(alias Spec, size_t Idxª) {
+	static if (
+		is(typeof(Spec) Rawº) &&
+		(is(Rawº Fº == delegate) || is(Rawº Fº : Fº*)) &&
+		is(Fº Pº == function) &&
+		is(Fº P == __parameters) &&
+		is(Fº Rº == return)
+	) {
+		struct UnionSpecInfo {
+			enum Idx = Idxª;
+			enum ParamName = __traits(identifier, P);
+			alias ParamTypeº = Pº[0];
+			alias RetTypeº = Rº;
+		};
 	} else {
-		static assert(0, Err);
+		enum int Idx1 = Idxª + 1;
+		static assert(0, `field spec #`~Idx1.stringof~` is invalid`);
 	};
 };
 
