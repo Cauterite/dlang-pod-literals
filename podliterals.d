@@ -1,28 +1,5 @@
 /* --- */
 
-// TODO: unions
-// pod!(Tº, Specs...) might already work with unions
-
-void main() {
-	import std.stdio;
-	version (unittest) {
-		writeln(`success`);
-	} else {
-		writeln(`compile with -unittest`);
-	};
-};
-
-unittest {
-	import std.stdio;
-	import std.meta;
-	import std.traits;
-
-	//long b = 6;
-	//pragma(msg, pod!(b => .b).b);
-};
-
-/* --- */
-
 unittest {
 	/* make a struct */
 	immutable Data = pod!(
