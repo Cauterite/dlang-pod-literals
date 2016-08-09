@@ -191,6 +191,28 @@ unittest {
 	assert(g().array == [0, 1, 2, 3, 4, 5, 6]);
 };
 
+unittest {
+	/* the shadowing problem: */
+	static assert(!__traits(compiles, {
+		int Id = 2;
+		auto Data = pod!(
+			Name => `jeff`,
+			Id => Id, // whoops
+			Alive => true,
+		);
+	}));
+
+	{/* the workaround */
+		int Id = 2;
+		auto Data = pod!(
+			Name => `jeff`,
+			Id· => Id, /* ALT+0183 */
+			Alive => true,
+		);
+		assert(Data.Id == Id);
+	};
+};
+
 /* --- */
 
 enum pod() = Podº!()();
@@ -198,11 +220,11 @@ enum pod() = Podº!()();
 auto pod(Specs...)() if (__traits(isTemplate, Specs)) {
 	/* structure-type POD */
 
-	char[] StructBodyStr() {
-		char[] S;
+	dchar[] StructBodyStr() {
+		dchar[] S;
 		foreach (Idx, _; Specs) {
-			S ~= `typeof(Specs[`~Idx.stringof~`]((void[0]).init)), `;
-			S ~= `"`~PodSpecIdent!(Specs[Idx], Idx)~`", `;
+			S ~= `typeof(Specs[`~Idx.stringof~`](Poisonº.init)), `d;
+			S ~= `"`~PodSpecIdent!(Specs[Idx], Idx)~`", `d;
 		};
 		return S;
 	};
@@ -216,21 +238,22 @@ auto pod(Specs...)() if (!__traits(isTemplate, Specs)) {
 
 	alias Q(size_t Idx) = UnionSpecInfo!(Specs[Idx], Idx);
 
-	char[] UnionBodyStr() {
-		char[] S;
+	dchar[] UnionBodyStr() {
+		dchar[] S;
 		foreach (Idx, _; Specs) {
-			S ~= `Q!`~Idx.stringof~`.ParamTypeº, "`~Q!Idx.ParamName~`", `;
+			S ~= `Q!`~Idx.stringof~`.ParamTypeº, "`~Q!Idx.ParamName~`", `d;
 		};
 		return S;
 	};
 
-	char[] InstanceBodyStr() {
-		char[] S;
+	dchar[] InstanceBodyStr() {
+		dchar[] S;
 		foreach (Idx, _; Specs) {
 			if (is(Q!Idx.RetTypeº == typeof(null))) {continue;};
 			/* `ParamName : Specs[Idx](ParamTypeº.init),` */
-			S ~= Q!Idx.ParamName~` : `;
-			S ~= `Specs[`~Idx.stringof~`](Q!`~Idx.stringof~`.ParamTypeº.init),`;
+			S ~= Q!Idx.ParamName~` : `d;
+			enum I = Idx.stringof;
+			S ~= `Specs[`~I~`](Q!(`~I~`).ParamTypeº.init),`d;
 		};
 		return S;
 	};
@@ -244,11 +267,11 @@ auto pod(Specs...)() if (!__traits(isTemplate, Specs)) {
 auto pod(Tº, Specs...)() if (is(Tº == struct) && __traits(isPOD, Tº)) {
 	/* instanciate POD from existing structure type */
 
-	char[] InstanceBodyStr() {
-		char[] S;
+	dchar[] InstanceBodyStr() {
+		dchar[] S;
 		foreach (Idx, _; Specs) {
-			S ~= PodSpecIdent!(Specs[Idx], Idx)~` : `;
-			S ~= `Specs[`~Idx.stringof~`]((void[0]).init),`;
+			S ~= PodSpecIdent!(Specs[Idx], Idx)~` : `d;
+			S ~= `Specs[`~Idx.stringof~`](Poisonº.init),`d;
 		};
 		return S;
 	};
@@ -303,7 +326,7 @@ private template PodSpecIdent(alias Spec, size_t Idx) {
 		(is(Rawº Fº == delegate) || is(Rawº Fº : Fº*)) &&
 		is(Fº P == __parameters)
 	) {
-		enum PodSpecIdent = __traits(identifier, P);
+		enum PodSpecIdent = __traits(identifier, P).strip_ident_padding;
 	} else {
 		enum int Idx1 = Idx + 1;
 		static assert(0, `field spec #`~Idx1.stringof~` is invalid`);
@@ -320,7 +343,7 @@ private template UnionSpecInfo(alias Spec, size_t Idxª) {
 	) {
 		struct UnionSpecInfo {
 			enum Idx = Idxª;
-			enum ParamName = __traits(identifier, P);
+			enum ParamName = __traits(identifier, P).strip_ident_padding;
 			alias ParamTypeº = Pº[0];
 			alias RetTypeº = Rº;
 		};
@@ -328,6 +351,44 @@ private template UnionSpecInfo(alias Spec, size_t Idxª) {
 		enum int Idx1 = Idxª + 1;
 		static assert(0, `field spec #`~Idx1.stringof~` is invalid`);
 	};
+};
+
+/* pad character which can be lead or trail POD-spec identifiers.
+exists to solve the shadowing problem. */
+private enum dchar Pad = dchar(183); /* middle dot */
+private dstring strip_ident_padding(dstring S) {
+	while (S && S[$ - 1] == Pad) {S = S[0 .. $ - 1];};
+	while (S && S[0] == Pad) {S = S[1 .. $];};
+	assert(S != ``);
+	return S;
+};
+unittest {
+	static if (Pad == '·') {
+		alias f = strip_ident_padding;
+		assert(f(`···foo·····`) == `foo`);
+		assert(f(`···foo`) == `foo`);
+		assert(f(`·foo`) == `foo`);
+		assert(f(`·foo·`) == `foo`);
+		assert(f(`foo····`) == `foo`);
+		assert(f(`foo`) == `foo`);
+		assert(f(`···x····`) == `x`);
+		assert(f(`x`) == `x`);
+	};
+};
+
+/* this is the type fed into the lambdas of POD-specs.
+it's designed to catch the common mistake of shadowing local variable references
+in the body of the lambda:
+	int x = 1;
+	pod!(x => x); // ERROR
+
+however we can't detect this mistake for union literals */
+private alias Poisonº = POD_FIELD_NAME_SHADOWING_LAMBDA_BODY;
+private struct POD_FIELD_NAME_SHADOWING_LAMBDA_BODY {
+	@disable this();
+	@disable this(this);
+	@disable this(typeof(this));
+	@disable void opAssign(in ref typeof(this));
 };
 
 /* --- */
